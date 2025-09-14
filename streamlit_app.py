@@ -81,7 +81,7 @@ combine_pages = st.sidebar.checkbox("Combine all pages", value=True)
 
 urls_input = st.text_area(
     "Enter URLs (one per line):",
-    placeholder="https://example.com\nhttps://another-site.com",
+    placeholder="https://example.com",
     height=150,
 )
 
