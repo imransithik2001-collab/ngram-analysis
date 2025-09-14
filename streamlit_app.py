@@ -97,7 +97,7 @@ if st.button("Scrape & Analyze"):
 
         # Save results in session_state to avoid re-scraping
         st.session_state["scraped_data"] = scraped_data
-        st.success("✅ Scraping complete. Now you can switch filters without re-scraping.")
+        st.success("✅ Scraping complete. Now you can switch filters.")
 
 # Load stored data if available
 if "scraped_data" in st.session_state:
