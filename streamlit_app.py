@@ -1,174 +1,124 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+import nltk
+from nltk.util import ngrams
+from nltk.corpus import stopwords
 import pandas as pd
-import matplotlib.pyplot as plt
 import re
 from collections import Counter
-import nltk
 
-# Ensure NLTK downloads work locally
-try:
-    nltk.data.find("tokenizers/punkt")
-except LookupError:
-    nltk.download("punkt")
-try:
-    nltk.data.find("corpora/stopwords")
-except LookupError:
-    nltk.download("stopwords")
-
-from nltk.corpus import stopwords
-from nltk.util import ngrams
+# =======================
+# NLTK Setup
+# =======================
+# Ensure required NLTK resources are available
+for resource, path in [
+    ("punkt", "tokenizers/punkt"),
+    ("punkt_tab", "tokenizers/punkt_tab"),
+    ("stopwords", "corpora/stopwords"),
+]:
+    try:
+        nltk.data.find(path)
+    except LookupError:
+        nltk.download(resource)
 
 STOPWORDS = set(stopwords.words("english"))
 
-# ==============================
-# Scraper (cached)
-# ==============================
-@st.cache_data
-def scrape_url(url: str, include_headings=False):
-    """Scrape meta title and on-page content from a URL (cached)."""
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.text, "html.parser")
+# =======================
+# Scraping Functions
+# =======================
+def scrape_webpage(url):
+    """Scrape both meta title and on-page <p> content from a URL."""
+    response = requests.get(url, timeout=10)
+    soup = BeautifulSoup(response.text, "html.parser")
 
-        # Meta title
-        meta_title = None
-        if soup.title:
-            meta_title = soup.title.string.strip()
-        elif soup.find("meta", attrs={"name": "title"}):
-            meta_title = soup.find("meta", attrs={"name": "title"})["content"].strip()
+    # Meta title
+    title_tag = soup.find("title")
+    meta_title = title_tag.get_text().strip() if title_tag else ""
 
-        # On-page content
-        content = " ".join([p.get_text() for p in soup.find_all("p")])
-        if include_headings:
-            headings = " ".join(
-                [h.get_text() for h in soup.find_all(["h1", "h2", "h3"])]
-            )
-            content = content + " " + headings
+    # On-page content
+    paragraphs = soup.find_all("p")
+    page_text = " ".join([p.get_text() for p in paragraphs])
 
-        return {"url": url, "meta_title": meta_title, "content": content}
-    except Exception:
-        return {"url": url, "meta_title": None, "content": ""}
+    return {"url": url, "meta_title": meta_title, "page_text": page_text}
 
 
-# ==============================
-# Text processing
-# ==============================
 def clean_text(text):
-    text = re.sub(r"[^\w\s]", "", text)
+    """Lowercase + remove punctuation/numbers."""
+    text = re.sub(r"[^a-zA-Z\s]", "", text)  # Keep only letters/spaces
     text = text.lower()
     return text
 
 
 def tokenize(text):
+    """Tokenize and remove stopwords."""
     tokens = nltk.word_tokenize(text)
     return [t for t in tokens if t not in STOPWORDS]
 
 
 def run_ngram_analysis(text, n=2, top_k=10):
+    """Generate n-grams and return most common ones."""
     tokens = tokenize(clean_text(text))
     ngram_list = list(ngrams(tokens, n))
-    ngram_freq = Counter(ngram_list).most_common(top_k)
-    return ngram_freq
+    return Counter(ngram_list).most_common(top_k)
 
 
-# ==============================
+# =======================
 # Streamlit App
-# ==============================
+# =======================
 st.set_page_config(page_title="N-gram Analyzer", layout="wide")
-st.title("🔎 N-gram Analyzer (Meta Title & On-page Content)")
+st.title("🔍 N-gram Analyzer for Meta Title & On-page Content")
 
-# Sidebar
-st.sidebar.header("Settings")
-urls_input = st.sidebar.text_area(
-    "Enter URLs (one per line)", height=200, placeholder="https://example.com"
+st.sidebar.header("Configuration")
+analysis_type = st.sidebar.radio(
+    "Select what to analyze:", ["Meta Title", "On-page Content"]
+)
+ngram_size = st.sidebar.selectbox("N-gram size:", [1, 2, 3], index=1)
+top_k = st.sidebar.slider("Number of top n-grams:", 5, 20, 10)
+combine_pages = st.sidebar.checkbox("Combine all pages", value=True)
+
+# Input URLs
+urls_input = st.text_area(
+    "Enter URLs (one per line):",
+    "https://www.trioangle.com/ubereats-clone/\n"
+    "https://www.elluminatiinc.com/e-delivery/ubereats-clone/\n"
+    "https://www.spotneats.com/",
+    height=150,
 )
 
-analysis_mode = st.sidebar.radio(
-    "Analyze", ["Meta title", "On-page", "Both"], index=1
-)
+urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
 
-include_headings = st.sidebar.checkbox("Include H1/H2/H3 in On-page", value=False)
-combine_pages = st.sidebar.checkbox("Combine all pages into one analysis", value=True)
-ngram_size = st.sidebar.slider("N-gram size", 1, 4, 2)
-top_k = st.sidebar.slider("Top-K results", 5, 30, 10)
-
-if st.sidebar.button("Run Analysis"):
-    urls = [u.strip() for u in urls_input.splitlines() if u.strip()]
+if st.button("Scrape & Analyze"):
     if not urls:
-        st.error("⚠️ Please enter at least one URL")
-        st.stop()
+        st.error("Please enter at least one URL.")
+    else:
+        # Scrape all URLs once and store results
+        scraped_data = [scrape_webpage(u) for u in urls]
 
-    # Scrape all URLs (cached)
-    scraped_data = [scrape_url(u, include_headings) for u in urls]
+        # Save results in session_state to avoid re-scraping
+        st.session_state["scraped_data"] = scraped_data
+        st.success("✅ Scraping complete. Now you can switch filters without re-scraping.")
 
-    # Show raw meta titles (for reference)
-    if analysis_mode in ["Meta title", "Both"]:
-        st.subheader("📌 Meta Titles Extracted")
-        df_titles = pd.DataFrame(
-            [(d["url"], d["meta_title"]) for d in scraped_data],
-            columns=["URL", "Meta Title"],
-        )
-        st.dataframe(df_titles, use_container_width=True)
+# Load stored data if available
+if "scraped_data" in st.session_state:
+    scraped_data = st.session_state["scraped_data"]
 
-    # Select text to analyze
+    # Helper function: select text based on filter
     def select_text(entry):
-        if analysis_mode == "Meta title":
-            return entry["meta_title"] or ""
-        elif analysis_mode == "On-page":
-            return entry["content"] or ""
-        else:  # Both
-            return " ".join(
-                [entry["meta_title"] or "", entry["content"] or ""]
-            )
+        return entry["meta_title"] if analysis_type == "Meta Title" else entry["page_text"]
 
     if combine_pages:
         combined_text = " ".join([select_text(e) for e in scraped_data])
         freqs = run_ngram_analysis(combined_text, n=ngram_size, top_k=top_k)
-        df = pd.DataFrame(
-            [(" ".join(ng), freq) for ng, freq in freqs],
-            columns=["N-gram", "Frequency"],
-        )
-
-        st.subheader("📊 Combined Results")
-        st.dataframe(df, use_container_width=True)
-
-        # Chart
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.barh(df["N-gram"], df["Frequency"], color="skyblue")
-        ax.invert_yaxis()
-        st.pyplot(fig)
-
-        # Download
-        st.download_button(
-            "Download CSV", df.to_csv(index=False).encode("utf-8"), "ngrams.csv", "text/csv"
-        )
+        df = pd.DataFrame([(" ".join(ng), freq) for ng, freq in freqs], columns=["N-gram", "Frequency"])
+        st.subheader(f"Top {top_k} {ngram_size}-grams ({analysis_type}, Combined Pages)")
+        st.dataframe(df)
+        st.bar_chart(df.set_index("N-gram"))
     else:
-        st.subheader("📊 Per-page Results")
         for entry in scraped_data:
             text = select_text(entry)
-            if not text.strip():
-                st.warning(f"No content found for {entry['url']}")
-                continue
-
             freqs = run_ngram_analysis(text, n=ngram_size, top_k=top_k)
-            df = pd.DataFrame(
-                [(" ".join(ng), freq) for ng, freq in freqs],
-                columns=["N-gram", "Frequency"],
-            )
-
-            st.markdown(f"**URL:** {entry['url']}")
-            st.dataframe(df, use_container_width=True)
-
-            fig, ax = plt.subplots(figsize=(8, 5))
-            ax.barh(df["N-gram"], df["Frequency"], color="lightgreen")
-            ax.invert_yaxis()
-            st.pyplot(fig)
-
-            st.download_button(
-                f"Download CSV for {entry['url']}",
-                df.to_csv(index=False).encode("utf-8"),
-                f"ngrams_{entry['url'].replace('https://','').replace('/','_')}.csv",
-                "text/csv",
-            )
+            df = pd.DataFrame([(" ".join(ng), freq) for ng, freq in freqs], columns=["N-gram", "Frequency"])
+            st.subheader(f"Top {top_k} {ngram_size}-grams ({analysis_type}) - {entry['url']}")
+            st.dataframe(df)
+            st.bar_chart(df.set_index("N-gram"))
