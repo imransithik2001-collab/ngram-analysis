@@ -78,11 +78,10 @@ top_k = st.sidebar.slider("Number of top n-grams:", 5, 20, 10)
 combine_pages = st.sidebar.checkbox("Combine all pages", value=True)
 
 # Input URLs
+
 urls_input = st.text_area(
     "Enter URLs (one per line):",
-    "https://www.trioangle.com/ubereats-clone/\n"
-    "https://www.elluminatiinc.com/e-delivery/ubereats-clone/\n"
-    "https://www.spotneats.com/",
+    placeholder="https://example.com\nhttps://another-site.com",
     height=150,
 )
 
