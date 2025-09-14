@@ -1,144 +1,174 @@
-import time
-import requests
-import pandas as pd
 import streamlit as st
+import requests
 from bs4 import BeautifulSoup
-from collections import Counter
+import pandas as pd
 import matplotlib.pyplot as plt
+import re
+from collections import Counter
+import nltk
 
-# === Stopwords handling (fallback if nltk unavailable) ===
+# Ensure NLTK downloads work locally
 try:
-    import nltk
-    from nltk.corpus import stopwords
-    nltk.download("punkt", quiet=True)
-    nltk.download("stopwords", quiet=True)
-    STOPWORDS = set(stopwords.words("english"))
-except Exception:
-    STOPWORDS = set([
-        "the", "and", "is", "in", "to", "of", "a", "for", "on", "with",
-        "that", "this", "as", "at", "by", "an", "be", "are", "or", "from"
-    ])
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
+try:
+    nltk.data.find("corpora/stopwords")
+except LookupError:
+    nltk.download("stopwords")
 
+from nltk.corpus import stopwords
+from nltk.util import ngrams
 
-# === Scraping functions ===
-def scrape_url(url, include_headings=False):
+STOPWORDS = set(stopwords.words("english"))
+
+# ==============================
+# Scraper (cached)
+# ==============================
+@st.cache_data
+def scrape_url(url: str, include_headings=False):
+    """Scrape meta title and on-page content from a URL (cached)."""
     try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-    except Exception as e:
-        return {"url": url, "error": str(e), "meta_title": "", "content": ""}
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+        # Meta title
+        meta_title = None
+        if soup.title:
+            meta_title = soup.title.string.strip()
+        elif soup.find("meta", attrs={"name": "title"}):
+            meta_title = soup.find("meta", attrs={"name": "title"})["content"].strip()
 
-    # Meta title
-    meta_title = soup.title.string.strip() if soup.title else ""
+        # On-page content
+        content = " ".join([p.get_text() for p in soup.find_all("p")])
+        if include_headings:
+            headings = " ".join(
+                [h.get_text() for h in soup.find_all(["h1", "h2", "h3"])]
+            )
+            content = content + " " + headings
 
-    # On-page content
-    texts = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
-    if include_headings:
-        texts += [h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2", "h3"])]
-
-    content = " ".join(texts)
-    return {"url": url, "meta_title": meta_title, "content": content}
+        return {"url": url, "meta_title": meta_title, "content": content}
+    except Exception:
+        return {"url": url, "meta_title": None, "content": ""}
 
 
-# === N-gram analysis ===
+# ==============================
+# Text processing
+# ==============================
+def clean_text(text):
+    text = re.sub(r"[^\w\s]", "", text)
+    text = text.lower()
+    return text
+
+
 def tokenize(text):
-    return [
-        w.lower() for w in text.split()
-        if w.isalpha() or w.replace("-", "").isalpha()
-    ]
+    tokens = nltk.word_tokenize(text)
+    return [t for t in tokens if t not in STOPWORDS]
 
 
-def get_ngrams(text, n=2, top_k=20):
-    words = [w for w in tokenize(text) if w not in STOPWORDS]
-    ngrams = zip(*[words[i:] for i in range(n)])
-    ngram_list = [" ".join(ng) for ng in ngrams]
-    return Counter(ngram_list).most_common(top_k)
+def run_ngram_analysis(text, n=2, top_k=10):
+    tokens = tokenize(clean_text(text))
+    ngram_list = list(ngrams(tokens, n))
+    ngram_freq = Counter(ngram_list).most_common(top_k)
+    return ngram_freq
 
 
-# === Streamlit App ===
-st.set_page_config(page_title="N-gram Analyzer", page_icon="🔍", layout="wide")
-st.title("🔍 N-gram Analyzer for Meta Titles & On-page Content")
+# ==============================
+# Streamlit App
+# ==============================
+st.set_page_config(page_title="N-gram Analyzer", layout="wide")
+st.title("🔎 N-gram Analyzer (Meta Title & On-page Content)")
 
+# Sidebar
 st.sidebar.header("Settings")
-urls_input = st.sidebar.text_area("Enter URLs (one per line)", height=150)
-analyze_mode = st.sidebar.selectbox("Analyze", ["Meta title", "On-page content", "Both"])
-include_headings = st.sidebar.checkbox("Include H1/H2/H3 in on-page content", True)
-n = st.sidebar.slider("N-gram size (n)", 1, 4, 2)
-top_k = st.sidebar.slider("Top-K results", 5, 50, 20)
-combine_mode = st.sidebar.checkbox("Combine all pages", True)
-delay = st.sidebar.slider("Delay between requests (seconds)", 0, 5, 1)
+urls_input = st.sidebar.text_area(
+    "Enter URLs (one per line)", height=200, placeholder="https://example.com"
+)
 
-run_btn = st.sidebar.button("Run analysis")
+analysis_mode = st.sidebar.radio(
+    "Analyze", ["Meta title", "On-page", "Both"], index=1
+)
 
-if run_btn:
+include_headings = st.sidebar.checkbox("Include H1/H2/H3 in On-page", value=False)
+combine_pages = st.sidebar.checkbox("Combine all pages into one analysis", value=True)
+ngram_size = st.sidebar.slider("N-gram size", 1, 4, 2)
+top_k = st.sidebar.slider("Top-K results", 5, 30, 10)
+
+if st.sidebar.button("Run Analysis"):
     urls = [u.strip() for u in urls_input.splitlines() if u.strip()]
     if not urls:
-        st.warning("Please enter at least one URL.")
-    else:
-        results = []
-        meta_titles = []
-        combined_content = []
+        st.error("⚠️ Please enter at least one URL")
+        st.stop()
 
-        st.info("Scraping started...")
-        progress = st.progress(0)
-        for i, url in enumerate(urls):
-            res = scrape_url(url, include_headings=include_headings)
-            if res.get("error"):
-                st.error(f"Error scraping {url}: {res['error']}")
+    # Scrape all URLs (cached)
+    scraped_data = [scrape_url(u, include_headings) for u in urls]
+
+    # Show raw meta titles (for reference)
+    if analysis_mode in ["Meta title", "Both"]:
+        st.subheader("📌 Meta Titles Extracted")
+        df_titles = pd.DataFrame(
+            [(d["url"], d["meta_title"]) for d in scraped_data],
+            columns=["URL", "Meta Title"],
+        )
+        st.dataframe(df_titles, use_container_width=True)
+
+    # Select text to analyze
+    def select_text(entry):
+        if analysis_mode == "Meta title":
+            return entry["meta_title"] or ""
+        elif analysis_mode == "On-page":
+            return entry["content"] or ""
+        else:  # Both
+            return " ".join(
+                [entry["meta_title"] or "", entry["content"] or ""]
+            )
+
+    if combine_pages:
+        combined_text = " ".join([select_text(e) for e in scraped_data])
+        freqs = run_ngram_analysis(combined_text, n=ngram_size, top_k=top_k)
+        df = pd.DataFrame(
+            [(" ".join(ng), freq) for ng, freq in freqs],
+            columns=["N-gram", "Frequency"],
+        )
+
+        st.subheader("📊 Combined Results")
+        st.dataframe(df, use_container_width=True)
+
+        # Chart
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.barh(df["N-gram"], df["Frequency"], color="skyblue")
+        ax.invert_yaxis()
+        st.pyplot(fig)
+
+        # Download
+        st.download_button(
+            "Download CSV", df.to_csv(index=False).encode("utf-8"), "ngrams.csv", "text/csv"
+        )
+    else:
+        st.subheader("📊 Per-page Results")
+        for entry in scraped_data:
+            text = select_text(entry)
+            if not text.strip():
+                st.warning(f"No content found for {entry['url']}")
                 continue
 
-            if analyze_mode in ["On-page content", "Both"]:
-                combined_content.append(res["content"])
-            if analyze_mode in ["Meta title", "Both"]:
-                meta_titles.append({"URL": url, "Meta Title": res["meta_title"]})
+            freqs = run_ngram_analysis(text, n=ngram_size, top_k=top_k)
+            df = pd.DataFrame(
+                [(" ".join(ng), freq) for ng, freq in freqs],
+                columns=["N-gram", "Frequency"],
+            )
 
-            results.append(res)
-            progress.progress((i + 1) / len(urls))
-            time.sleep(delay)
+            st.markdown(f"**URL:** {entry['url']}")
+            st.dataframe(df, use_container_width=True)
 
-        # Meta titles
-        if analyze_mode in ["Meta title", "Both"] and meta_titles:
-            st.subheader("Meta Titles")
-            st.dataframe(pd.DataFrame(meta_titles))
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.barh(df["N-gram"], df["Frequency"], color="lightgreen")
+            ax.invert_yaxis()
+            st.pyplot(fig)
 
-        # N-gram analysis
-        if analyze_mode in ["On-page content", "Both"]:
-            if combine_mode:
-                st.subheader("Combined N-gram Analysis")
-                all_text = " ".join(combined_content)
-                ngrams = get_ngrams(all_text, n=n, top_k=top_k)
-                df = pd.DataFrame(ngrams, columns=["N-gram", "Frequency"])
-                st.dataframe(df)
-
-                # Chart
-                fig, ax = plt.subplots()
-                df.plot(kind="barh", x="N-gram", y="Frequency", ax=ax, legend=False)
-                st.pyplot(fig)
-
-                # Download
-                st.download_button(
-                    "Download CSV", df.to_csv(index=False), "ngrams.csv", "text/csv"
-                )
-            else:
-                st.subheader("Per-page N-gram Analysis")
-                for res in results:
-                    text = res["content"]
-                    if not text.strip():
-                        continue
-                    ngrams = get_ngrams(text, n=n, top_k=top_k)
-                    df = pd.DataFrame(ngrams, columns=["N-gram", "Frequency"])
-                    st.markdown(f"**{res['url']}**")
-                    st.dataframe(df)
-
-                    fig, ax = plt.subplots()
-                    df.plot(kind="barh", x="N-gram", y="Frequency", ax=ax, legend=False)
-                    st.pyplot(fig)
-
-                    st.download_button(
-                        f"Download CSV for {res['url']}",
-                        df.to_csv(index=False),
-                        f"ngrams_{res['url'].replace('https://','').replace('/','_')}.csv",
-                        "text/csv",
-                    )
+            st.download_button(
+                f"Download CSV for {entry['url']}",
+                df.to_csv(index=False).encode("utf-8"),
+                f"ngrams_{entry['url'].replace('https://','').replace('/','_')}.csv",
+                "text/csv",
+            )
